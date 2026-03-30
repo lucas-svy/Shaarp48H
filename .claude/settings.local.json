@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.mwcbarcelona.com)",
+      "WebSearch",
+      "Bash(npm install:*)",
+      "Bash(del \"C:\\\\Users\\\\lucas\\\\Desktop\\\\B3\\\\48H\\\\Shaarp48H\\\\backend\\\\specs\\\\vivatechnology.com_auto.json\")"
+    ]
+  }
+}

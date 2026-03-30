@@ -1,0 +1,15 @@
+{
+  "base_url": "https://www.vivatechnology.com",
+  "cards_selector": "div.w-full.transition-all.duration-250.flex.flex-wrap.opacity-100.translate-y-0",
+  "wait_for_selector": "div.w-full.transition-all.duration-250.flex.flex-wrap.opacity-100.translate-y-0",
+  "fields": {
+    "name": "h3",
+    "profile_url": "a.absolute"
+  },
+  "pagination": {
+    "mode": "infinite_scroll",
+    "max_scroll_rounds": 50,
+    "scroll_pause_ms": 1500
+  },
+  "dedupe_by": "name"
+}

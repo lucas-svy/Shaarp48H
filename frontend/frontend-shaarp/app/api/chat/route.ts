@@ -161,6 +161,43 @@ export async function POST(req: Request) {
 
   const backendDir = getBackendDir();
   const candidates = buildPythonCandidates();
+  const userText = (payload.messages as ChatMessage[])
+  .filter(m => m.role === "user")
+  .map(m => m.content)
+  .join(" ");
+
+// Match full URLs (https://...) or bare domains (www.example.com/path)
+const rawUrlMatch = userText.match(/https?:\/\/[^\s]+/)
+  ?? userText.match(/(?:www\.)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:\/[^\s]*)?/);
+
+// Clean trailing punctuation that may have been captured
+const cleanedUrl = rawUrlMatch ? rawUrlMatch[0].replace(/[.,;!?)]+$/, "") : null;
+const urlMatch = cleanedUrl
+  ? [cleanedUrl.startsWith("http") ? cleanedUrl : `https://${cleanedUrl}`]
+  : null;
+
+if (urlMatch && !payload.scrape) {
+  const url = urlMatch[0];
+
+  // Known sites: use an existing spec (faster, no LLM generation needed)
+  const specMap: Record<string, string> = {
+    "mwcbarcelona.com": "specs/mwcbarcelona_exhibitors.json",
+    "vivatechnology.com": "specs/vivatechnology.com_auto.json",
+    "vancouver.websummit.com": "specs/vancouver.websummit.com_auto.json",
+    // Add more known sites here
+  };
+
+  let spec: string | undefined;
+  for (const [domain, specPath] of Object.entries(specMap)) {
+    if (url.includes(domain)) {
+      spec = specPath;
+      break;
+    }
+  }
+
+  // Always pass the URL — if no spec is found, openai_chat.py will auto-generate one
+  payload.scrape = spec ? { url, spec } : { url };
+}
   const result = await runOpenAIChatJson({ backendDir, candidates, payload });
   if (!result.ok) return result.response;
 

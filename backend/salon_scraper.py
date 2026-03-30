@@ -22,6 +22,12 @@ import argparse
 import asyncio
 import json
 import sys
+
+# Force UTF-8 output on Windows (avoids CP1252 UnicodeEncodeError with non-latin chars)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urljoin
@@ -64,6 +70,30 @@ class ScraperError(RuntimeError):
 def _read_json_file(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_spec_from_dict(data: Dict[str, Any]) -> ScrapeSpec:
+    """Build a ScrapeSpec directly from a dict (no file needed)."""
+    if "cards_selector" not in data or "fields" not in data:
+        raise ScraperError("Spec must include 'cards_selector' and 'fields'.")
+
+    pagination_data = data.get("pagination", {}) or {}
+    pagination = PaginationSpec(
+        mode=pagination_data.get("mode", "none"),
+        next_selector=pagination_data.get("next_selector"),
+        max_pages=int(pagination_data.get("max_pages", 1)),
+        scroll_pause_ms=int(pagination_data.get("scroll_pause_ms", 800)),
+        max_scroll_rounds=int(pagination_data.get("max_scroll_rounds", 30)),
+    )
+
+    return ScrapeSpec(
+        cards_selector=data["cards_selector"],
+        fields=dict(data["fields"]),
+        pagination=pagination,
+        wait_for_selector=data.get("wait_for_selector"),
+        base_url=data.get("base_url"),
+        dedupe_by=data.get("dedupe_by", "profile_url"),
+    )
 
 
 def load_spec(path: str) -> ScrapeSpec:
@@ -147,6 +177,99 @@ def _dedupe(exhibitors: Iterable[Exhibitor], key: str) -> List[Exhibitor]:
     return out
 
 
+async def analyze_page(url: str, headless: bool = True, timeout_ms: int = 30_000) -> str:
+    """Load a page with Playwright and return structured analysis for spec generation.
+
+    Returns a string containing:
+    - candidate CSS selectors (repeated elements likely to be cards)
+    - an HTML snippet from the content area (skips header/nav)
+    """
+    async with async_playwright() as p:
+        browser: Browser = await p.chromium.launch(headless=headless)
+        context = await browser.new_context()
+        page: Page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15_000)
+            except Exception:
+                pass
+
+            # Detect repeated VISIBLE elements — these are likely the exhibitor cards
+            candidates: list = await page.evaluate("""() => {
+                const hiddenClasses = new Set([
+                    'opacity-0','invisible','hidden','sr-only',
+                    'translate-y-full','translate-x-full','-translate-y-full',
+                    'scale-0','pointer-events-none'
+                ]);
+                const counts = {};
+                document.querySelectorAll('*').forEach(el => {
+                    const classes = [...el.classList].filter(Boolean);
+                    if (!classes.length) return;
+                    // Skip elements with hidden/animation Tailwind classes
+                    if (classes.some(c => hiddenClasses.has(c))) return;
+                    // Skip elements that are not visible
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0) return;
+                    const key = el.tagName.toLowerCase() + '.' + classes.join('.');
+                    counts[key] = (counts[key] || 0) + 1;
+                });
+                return Object.entries(counts)
+                    .filter(([, n]) => n >= 5)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 30)
+                    .map(([sel, n]) => sel + ' (x' + n + ')');
+            }""")
+
+            # For the top repeated element candidates, check if they contain <a href> links
+            link_info: list = await page.evaluate("""() => {
+                const hidden = new Set([
+                    'opacity-0','invisible','hidden','sr-only',
+                    'translate-y-full','-translate-y-full','scale-0'
+                ]);
+                const counts = {};
+                const samples = {};
+                document.querySelectorAll('*').forEach(el => {
+                    const cls = [...el.classList].filter(Boolean);
+                    if (!cls.length) return;
+                    if (cls.some(c => hidden.has(c))) return;
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0) return;
+                    const key = el.tagName.toLowerCase() + '.' + cls.join('.');
+                    counts[key] = (counts[key] || 0) + 1;
+                    if (!samples[key]) samples[key] = el;
+                });
+                return Object.entries(counts)
+                    .filter(([, n]) => n >= 5)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 20)
+                    .map(([sel, n]) => {
+                        const el = samples[sel];
+                        const link = el ? el.querySelector('a[href]') : null;
+                        const linkHref = link ? link.getAttribute('href') : null;
+                        const linkClass = link ? [...link.classList].join('.') : null;
+                        const linkSel = link
+                            ? (linkClass ? 'a.' + linkClass : 'a')
+                            : null;
+                        return sel + ' (x' + n + ')' + (linkSel ? ' → link: ' + linkSel + ' href=' + linkHref : ' → no <a> found');
+                    });
+            }""")
+
+            # Get a content-area HTML snippet (skip first 3 000 chars = likely header/nav)
+            full_html = await page.inner_html("body")
+            snippet = full_html[3_000:3_000 + 20_000]
+
+            candidates_txt = "\n".join(link_info) if link_info else "(none found)"
+            return (
+                f"URL: {url}\n\n"
+                f"Repeated elements with link info (candidate selectors for exhibitor cards):\n{candidates_txt}\n\n"
+                f"HTML snippet (characters 3000–23000 of body):\n{snippet}"
+            )
+        finally:
+            await context.close()
+            await browser.close()
+
+
 async def scrape_exhibitors(
     url: str,
     spec: ScrapeSpec,
@@ -168,6 +291,12 @@ async def scrape_exhibitors(
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
 
+            # Wait for JS-rendered content (e.g. React/Next.js pages).
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass  # networkidle may never fire on polling pages — that's fine
+
             wait_for = spec.wait_for_selector or spec.cards_selector
 
             results: List[Exhibitor] = []
@@ -184,6 +313,10 @@ async def scrape_exhibitors(
 
                     # Navigate to next page explicitly (more reliable than click).
                     await page.goto(next_href, wait_until="domcontentloaded", timeout=timeout_ms)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        pass
 
             else:
                 # Single page scrape, potentially after loading more results.

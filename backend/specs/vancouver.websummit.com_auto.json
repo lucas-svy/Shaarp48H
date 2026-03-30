@@ -1,0 +1,18 @@
+{
+  "base_url": "https://vancouver.websummit.com/startups/featured-startups/",
+  "cards_selector": "div.AttendeeList__ListItemWrapper-sc-bdb8e847-3.gsUmXr",
+  "wait_for_selector": "div.AttendeeList__ListItemWrapper-sc-bdb8e847-3.gsUmXr",
+  "fields": {
+    "name": ".ListItemStyles__ItemTitle-sc-72fa48a5-4.jbqlyd",
+    "booth": null,
+    "profile_url": "a"
+  },
+  "pagination": {
+    "mode": "next_button",
+    "next_selector": "button.Pagination__StyledPaginationButton-sc-ed344d7f-1.hQePXV",
+    "max_pages": 20,
+    "scroll_pause_ms": 800,
+    "max_scroll_rounds": 30
+  },
+  "dedupe_by": "profile_url"
+}

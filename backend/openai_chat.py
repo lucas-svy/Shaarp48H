@@ -20,13 +20,19 @@ import argparse
 import json
 import os
 import sys
+
+# Force UTF-8 output on Windows (avoids CP1252 UnicodeEncodeError with non-latin chars)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 
 import requests
 from dotenv import load_dotenv
 
-from salon_scraper import Exhibitor, ScrapeSpec, load_spec, scrape_exhibitors
+from salon_scraper import Exhibitor, ScrapeSpec, analyze_page, load_spec, load_spec_from_dict, scrape_exhibitors
 
 
 class OpenAIClientError(RuntimeError):
@@ -126,17 +132,110 @@ def _exhibitors_to_context(exhibitors: List[Exhibitor], *, limit: int = 80) -> s
     return "Exposants trouvés (échantillon):\n" + "\n".join(f"- {line}" for line in items)
 
 
+def _generate_spec(html_snippet: str, url: str, env: Dict[str, str]) -> ScrapeSpec:
+    """Ask the LLM to generate a ScrapeSpec from a raw HTML snippet."""
+    import re
+
+    prompt = (
+        "Tu es un expert en web scraping de sites de salons professionnels.\n"
+        "Analyse les informations ci-dessous pour générer un spec de scraping.\n\n"
+        f"{html_snippet}\n\n"
+        "INSTRUCTIONS :\n"
+        "1. Utilise la liste 'Repeated elements with link info' pour identifier le sélecteur CSS des cartes exposants.\n"
+        "   Les cartes sont généralement les éléments qui se répètent le plus (ex: 50x, 100x).\n"
+        "   IMPORTANT : évite absolument les sélecteurs contenant des classes Tailwind d'animation ou\n"
+        "   de visibilité : opacity-0, invisible, hidden, translate-y-full, scale-0, sr-only, etc.\n"
+        "   Ces classes indiquent des éléments cachés — Playwright ne pourra pas les trouver.\n"
+        "2. Pour le champ 'profile_url' : utilise le sélecteur du lien indiqué par '→ link:' dans la liste.\n"
+        "   Si '→ no <a> found', utilise ':scope' uniquement si la carte elle-même est une balise <a>.\n"
+        "   Ne mets JAMAIS ':scope' si la carte est un <div> — dans ce cas cherche 'a' ou 'a[href]' dedans.\n"
+        "3. Analyse le HTML snippet pour trouver les sélecteurs des champs à l'intérieur d'une carte.\n"
+        "3. Génère un JSON valide avec ce format exact :\n"
+        "{\n"
+        '  "base_url": "https://...",\n'
+        '  "cards_selector": "sélecteur CSS exact de chaque carte exposant",\n'
+        '  "wait_for_selector": "même valeur que cards_selector",\n'
+        '  "fields": {\n'
+        '    "name": "sélecteur CSS du nom de l\'exposant à l\'intérieur de la carte",\n'
+        '    "booth": "sélecteur CSS du numéro de stand (null si absent)",\n'
+        '    "profile_url": ":scope"\n'
+        "  },\n"
+        '  "pagination": {\n'
+        '    "mode": "none ou next_button ou infinite_scroll",\n'
+        '    "next_selector": "sélecteur du bouton page suivante (uniquement si next_button, sinon null)",\n'
+        '    "max_pages": 10,\n'
+        '    "max_scroll_rounds": 30,\n'
+        '    "scroll_pause_ms": 800\n'
+        "  },\n"
+        '  "dedupe_by": "profile_url"\n'
+        "}\n\n"
+        "Réponds UNIQUEMENT avec le JSON brut, sans markdown, sans explication."
+    )
+
+    raw = chat_completions(
+        messages=[{"role": "user", "content": prompt}],
+        model=env["model"],
+        api_key=env["api_key"],
+        api_url=env["api_url"],
+        temperature=0.1,
+    )
+    content = _extract_assistant_text(raw)
+
+    # Strip markdown code fences if present
+    match = re.search(r"```(?:json)?\s*([\s\S]+?)```", content)
+    if match:
+        content = match.group(1).strip()
+
+    spec_dict = json.loads(content)
+    return load_spec_from_dict(spec_dict)
+
+
+def _save_spec(spec: ScrapeSpec, url: str) -> None:
+    """Persist a generated spec to disk so it can be reused next time."""
+    import os
+    import re
+
+    domain = re.sub(r"^www\.", "", url.split("/")[2])
+    os.makedirs("specs", exist_ok=True)
+    spec_dict = {
+        "base_url": spec.base_url,
+        "cards_selector": spec.cards_selector,
+        "wait_for_selector": spec.wait_for_selector,
+        "fields": spec.fields,
+        "pagination": {
+            "mode": spec.pagination.mode,
+            "next_selector": spec.pagination.next_selector,
+            "max_pages": spec.pagination.max_pages,
+            "scroll_pause_ms": spec.pagination.scroll_pause_ms,
+            "max_scroll_rounds": spec.pagination.max_scroll_rounds,
+        },
+        "dedupe_by": spec.dedupe_by,
+    }
+    with open(f"specs/{domain}_auto.json", "w", encoding="utf-8") as f:
+        json.dump(spec_dict, f, indent=2, ensure_ascii=False)
+
+
 async def _maybe_scrape(
     *,
     scrape_url: Optional[str],
     scrape_spec_path: Optional[str],
     headless: bool,
     timeout_ms: int,
+    env: Optional[Dict[str, str]] = None,
 ) -> Optional[List[Exhibitor]]:
-    if not scrape_url or not scrape_spec_path:
+    if not scrape_url:
         return None
 
-    spec: ScrapeSpec = load_spec(scrape_spec_path)
+    if scrape_spec_path:
+        spec: ScrapeSpec = load_spec(scrape_spec_path)
+    elif env:
+        # No spec found — analyze the page and let the LLM generate one
+        html = await analyze_page(scrape_url, headless=headless, timeout_ms=timeout_ms)
+        spec = _generate_spec(html, scrape_url, env)
+        _save_spec(spec, scrape_url)
+    else:
+        return None
+
     exhibitors = await scrape_exhibitors(
         scrape_url,
         spec,
@@ -173,6 +272,24 @@ def build_messages(
     return messages
 
 
+_AGENT_SYSTEM_PROMPT = (
+    "Tu es un assistant spécialisé dans l'analyse de salons professionnels et d'exposants.\n"
+    "Tu disposes d'un outil de scraping automatique qui tourne AVANT que tu reçoives ce message.\n"
+    "Le scraping est déjà terminé quand tu réponds — tu ne peux pas en lancer un toi-même.\n\n"
+    "RÈGLES :\n"
+    "1. Si le contexte contient des données d'exposants (liste après 'Exposants trouvés') :\n"
+    "   → Affiche-les IMMÉDIATEMENT sous forme de tableau Markdown (colonnes : Nom, Stand, URL).\n"
+    "   → Ne pose aucune question, ne demande pas de validation, réponds directement.\n"
+    "2. Si le contexte indique 'Aucune donnée' ou est vide :\n"
+    "   → Dis que le scraping n'a pas pu récupérer les données (protection du site, sélecteurs incorrects).\n"
+    "   → Suggère à l'utilisateur de vérifier l'URL ou de réessayer.\n"
+    "   → Ne dis PAS 'je vais récupérer' ou 'veuillez patienter' — le scraping est déjà terminé.\n"
+    "3. Si l'utilisateur demande des exposants sans URL :\n"
+    "   → Demande uniquement l'URL complète (ex: https://www.vivatechnology.com/exhibitors).\n"
+    "4. Ne dis JAMAIS que tu ne peux pas accéder à internet."
+)
+
+
 def handle_chat_request(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Pure function wrapper for later web integration.
 
@@ -195,28 +312,48 @@ def handle_chat_request(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(messages, list) or not messages:
         raise OpenAIClientError("payload.messages must be a non-empty list")
 
+    # Always prepend the agent system prompt (unless a system message is already first)
+    if not messages or messages[0].get("role") != "system":
+        messages = [{"role": "system", "content": _AGENT_SYSTEM_PROMPT}] + list(messages)
+
     # Optional scrape enrichment
     scrape_cfg = payload.get("scrape") or None
     scrape_result: Optional[Dict[str, Any]] = None
     if isinstance(scrape_cfg, dict):
         url = scrape_cfg.get("url")
         spec_path = scrape_cfg.get("spec")
-        if url and spec_path:
+        if url:
             import asyncio
 
-            exhibitors = asyncio.run(
-                _maybe_scrape(
-                    scrape_url=str(url),
-                    scrape_spec_path=str(spec_path),
-                    headless=bool(scrape_cfg.get("headless", True)),
-                    timeout_ms=int(scrape_cfg.get("timeout_ms", 30_000)),
+            try:
+                exhibitors = asyncio.run(
+                    _maybe_scrape(
+                        scrape_url=str(url),
+                        scrape_spec_path=str(spec_path) if spec_path else None,
+                        headless=bool(scrape_cfg.get("headless", True)),
+                        timeout_ms=int(scrape_cfg.get("timeout_ms", 30_000)),
+                        env=env,
+                    )
                 )
-            )
+            except Exception as exc:
+                print(f"[scraper] error: {exc}", file=sys.stderr)
+                exhibitors = []
+
             ex_list = exhibitors or []
             scrape_result = {"exhibitors": [asdict(e) for e in ex_list]}
 
-            # Prepend as system context
-            context_txt = _exhibitors_to_context(ex_list)
+            # Prepend as system context — always explicit about success or failure
+            if ex_list:
+                context_txt = (
+                    f"SCRAPING TERMINÉ AVEC SUCCÈS — {len(ex_list)} exposants récupérés depuis {url}.\n\n"
+                    + _exhibitors_to_context(ex_list)
+                )
+            else:
+                context_txt = (
+                    f"SCRAPING TERMINÉ MAIS AUCUN EXPOSANT RÉCUPÉRÉ depuis {url}.\n"
+                    "Causes possibles : protection anti-bot, sélecteurs CSS incorrects, page nécessitant une authentification.\n"
+                    "Informe l'utilisateur de l'échec et suggère-lui de vérifier l'URL ou de réessayer."
+                )
             messages = [{"role": "system", "content": context_txt}] + messages
 
     raw = chat_completions(
