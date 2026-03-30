@@ -1,3 +1,4 @@
+import Image from "next/image";
 export default function Home() {
   return (
     <div className="flex h-screen bg-gray-100 font-sans">
@@ -11,6 +12,9 @@ export default function Home() {
 
       {/* Contenu principal */}
       <div className="flex-1 flex flex-col items-center justify-center relative">
+        <button className="ml-2 flex items-center justify-center">
+          <img src="arrow.png"></img>
+        </button>
         <div className="relative top-[-400px] w-full h-[150px] bg-white"></div>
         <a href="https://exemple.com/a-propos" target="_blank" rel="noopener noreferrer"
           className="relative top-[-475px] w-[200px] h-[40px] bg-blue-500 text-white rounded-full flex items-center justify-center hover:bg-blue-700"
