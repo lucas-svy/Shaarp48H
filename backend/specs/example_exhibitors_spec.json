@@ -1,0 +1,16 @@
+{
+  "cards_selector": ".exhibitor-card",
+  "wait_for_selector": ".exhibitor-card",
+  "fields": {
+    "name": ".exhibitor-card__name",
+    "booth": ".exhibitor-card__booth",
+    "categories": ".exhibitor-card__categories",
+    "profile_url": ".exhibitor-card__name a"
+  },
+  "pagination": {
+    "mode": "infinite_scroll",
+    "max_scroll_rounds": 20,
+    "scroll_pause_ms": 800
+  },
+  "dedupe_by": "profile_url"
+}

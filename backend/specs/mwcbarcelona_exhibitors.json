@@ -1,0 +1,16 @@
+{
+  "base_url": "https://www.mwcbarcelona.com",
+  "cards_selector": "ul.exhibitor-listing > a.exhibitor-item",
+  "wait_for_selector": "ul.exhibitor-listing > a.exhibitor-item",
+  "fields": {
+    "name": "h3",
+    "booth": "span.wrap-anywhere.block.text-sm",
+    "profile_url": ":scope"
+  },
+  "pagination": {
+    "mode": "next_button",
+    "next_selector": "a[aria-label=\"Next Page\"]",
+    "max_pages": 5
+  },
+  "dedupe_by": "profile_url"
+}
