@@ -1,36 +1,50 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Frontend — Shaarp48H
 
-## Getting Started
+Interface chat Next.js pour interagir avec le scraper d'exposants.
 
-First, run the development server:
+## Installation
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Ouvrir [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Structure
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```
+frontend-shaarp/
+├── app/
+│   ├── page.tsx          # Interface chat (React)
+│   ├── layout.tsx        # Layout global
+│   └── api/chat/
+│       └── route.ts      # Route API — spawn Python, stream SSE
+└── package.json
+```
 
-## Learn More
+## Fonctionnement
 
-To learn more about Next.js, take a look at the following resources:
+1. L'utilisateur envoie un message dans le chat
+2. Si le message contient une URL, `route.ts` détecte le domaine et associe le bon spec de scraping
+3. Le payload JSON est envoyé au subprocess Python (`openai_chat.py chat-json`)
+4. Le résultat est streamé vers le frontend via Server-Sent Events (SSE)
+5. Les exposants sont affichés dans un tableau Markdown
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Export
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+| Format | Séparateur | Encodage | Compatibilité |
+|--------|-----------|----------|--------------|
+| CSV | `;` | UTF-8 BOM | Excel FR/EN |
+| Excel (.xlsx) | — | — | Excel, LibreOffice |
 
-## Deploy on Vercel
+## Variables d'environnement
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+| Variable | Description |
+|----------|-------------|
+| `PYTHON_BIN` | Chemin Python custom (optionnel, auto-détecté sinon) |
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Logs
+
+Les logs serveur sont écrits dans `../../backend/logs/frontend.log` (chemin relatif au `cwd` Next.js).
+Format : `ISO8601 [LEVEL] message`

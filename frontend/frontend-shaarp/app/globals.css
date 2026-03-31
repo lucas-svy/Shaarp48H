@@ -3,6 +3,7 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  --purple: #C5B1FC;
 }
 
 @theme inline {

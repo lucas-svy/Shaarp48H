@@ -14,6 +14,11 @@ type Exhibitor = {
   booth?: string;
   profile_url?: string;
   categories?: string[];
+  description?: string;
+  logo?: string;
+  country?: string;
+  linkedin?: string;
+  twitter?: string;
   raw?: Record<string, unknown>;
 };
 type ApiResponse = {
@@ -26,9 +31,19 @@ type Conversation = { id: string; title: string; messages: Message[]; exhibitors
 type ScrapeState = { url: string; spec?: string; offset: number; pageSize: number };
 
 function downloadCSV(exhibitors: Exhibitor[]) {
-  const headers = ["Nom", "Stand", "URL", "Catégories"];
-  const rows = exhibitors.map((e) => [e.name ?? "", e.booth ?? "", e.profile_url ?? "", (e.categories ?? []).join("; ")]);
-  const csv = [headers, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+  const headers = ["Nom", "Stand", "Catégories", "Description", "Logo", "Pays", "LinkedIn", "Twitter/X", "URL"];
+  const rows = exhibitors.map((e) => [
+    e.name ?? "",
+    e.booth ?? "",
+    (e.categories ?? []).join("; "),
+    e.description ?? "",
+    e.logo ?? "",
+    e.country ?? "",
+    e.linkedin ?? "",
+    e.twitter ?? "",
+    e.profile_url ?? "",
+  ]);
+  const csv = [headers, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(";")).join("\n");
   const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a"); a.href = url; a.download = "exposants.csv"; a.click();
@@ -36,7 +51,17 @@ function downloadCSV(exhibitors: Exhibitor[]) {
 }
 
 function downloadXLSX(exhibitors: Exhibitor[]) {
-  const rows = exhibitors.map((e) => ({ Nom: e.name ?? "", Stand: e.booth ?? "", URL: e.profile_url ?? "", Catégories: (e.categories ?? []).join("; ") }));
+  const rows = exhibitors.map((e) => ({
+    Nom: e.name ?? "",
+    Stand: e.booth ?? "",
+    Catégories: (e.categories ?? []).join("; "),
+    Description: e.description ?? "",
+    Logo: e.logo ?? "",
+    Pays: e.country ?? "",
+    LinkedIn: e.linkedin ?? "",
+    "Twitter/X": e.twitter ?? "",
+    URL: e.profile_url ?? "",
+  }));
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Exposants");
@@ -238,10 +263,10 @@ export default function Home() {
       <motion.aside
         animate={{ width: sidebarOpen ? 280 : 60 }}
         transition={{ duration: 0.25, ease: "easeInOut" }}
-        className="flex flex-col bg-white border-r border-gray-200 shrink-0 overflow-hidden"
+        className="flex flex-col bg-white border-r border-[var(--purple)] shrink-0 overflow-hidden shadow-[2px_0_8px_0_var(--purple)]"
       >
         {/* Header */}
-        <div className="flex items-center h-14 px-3 border-b border-gray-100 shrink-0">
+        <div className="flex items-center h-14 px-3 border-b border-[var(--purple)] shrink-0">
           <AnimatePresence mode="wait">
             {sidebarOpen ? (
               <motion.div
@@ -377,8 +402,16 @@ export default function Home() {
                 transition={{ duration: 0.3, ease: "easeOut" }}
                 className="flex flex-col items-center justify-center h-full pb-32"
               >
+                <Image
+                  src="/assets/images/SHAARP_LOGO_PRINCIPAL_COULEUR1.png"
+                  alt="Shaarp"
+                  width={200}
+                  height={60}
+                  className="object-contain"
+                  priority
+                />
                 <h1 className="text-5xl font-bold text-gray-900 tracking-tight text-center">
-                  Exhibition Scraper Agent
+                  scraper
                 </h1>
               </motion.div>
             ) : (

@@ -1,7 +1,18 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 
 export const runtime = "nodejs";
+
+const LOG_FILE = path.resolve(process.cwd(), "..", "..", "backend", "logs", "frontend.log");
+
+function writeLog(level: "INFO" | "WARN" | "ERROR", msg: string) {
+  const line = `${new Date().toISOString()} [${level}] ${msg}\n`;
+  try {
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    fs.appendFileSync(LOG_FILE, line, "utf-8");
+  } catch { /* non-blocking */ }
+}
 
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 
@@ -62,10 +73,13 @@ export async function POST(req: Request) {
     ? cleanedUrl.startsWith("http") ? cleanedUrl : `https://${cleanedUrl}`
     : null;
 
+  if (detectedUrl) writeLog("INFO", `URL detected: ${detectedUrl}`);
+
   if (detectedUrl && !payload.scrape) {
     const specMap: Record<string, string> = {
       "mwcbarcelona.com": "specs/mwcbarcelona_exhibitors.json",
       "vivatechnology.com": "specs/vivatechnology.com_auto.json",
+      "vivatech.com": "specs/vivatechnology.com_auto.json",
       "vancouver.websummit.com": "specs/vancouver.websummit.com_auto.json",
     };
     let spec: string | undefined;
@@ -139,12 +153,16 @@ export async function POST(req: Request) {
             const stdout = Buffer.concat(stdoutChunks).toString("utf-8").trim();
 
             if (code !== 0) {
+              writeLog("ERROR", `Python exited ${code}: ${stderrBuf.slice(0, 300)}`);
               send({ type: "error", error: "python_failed", details: stderrBuf });
             } else {
               try {
                 const result = JSON.parse(stdout);
+                const scrapeCount = (result.scrape?.exhibitors ?? []).length;
+                writeLog("INFO", `Request OK scrape_count=${scrapeCount}`);
                 send({ type: "result", ...result });
               } catch {
+                writeLog("WARN", `Invalid JSON from Python: ${stdout.slice(0, 200)}`);
                 send({ type: "error", error: "invalid_json", details: stdout.slice(0, 500) });
               }
             }
