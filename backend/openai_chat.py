@@ -32,7 +32,12 @@ from typing import Any, Dict, List, Optional
 import requests
 from dotenv import load_dotenv
 
-from salon_scraper import Exhibitor, ScrapeSpec, analyze_page, load_spec, load_spec_from_dict, scrape_exhibitors
+from salon_scraper import Exhibitor, ScrapeSpec, StatusCallback, analyze_page, load_spec, load_spec_from_dict, scrape_exhibitors, scrape_hybrid
+
+
+def _emit_status(msg: str) -> None:
+    """Write a structured status line to stderr — streamed live to the frontend."""
+    print(json.dumps({"type": "status", "msg": msg}), file=sys.stderr, flush=True)
 
 
 class OpenAIClientError(RuntimeError):
@@ -103,6 +108,24 @@ def _extract_assistant_text(chat_response: Dict[str, Any]) -> str:
         return chat_response["choices"][0]["message"]["content"]
     except Exception:
         return json.dumps(chat_response, ensure_ascii=False)
+
+
+def _format_exhibitors_markdown(exhibitors: List[Exhibitor], url: str, offset: int = 0) -> str:
+    """Build a markdown table directly — no LLM needed."""
+    start = offset + 1
+    end = offset + len(exhibitors)
+    header = f"Voici les **{len(exhibitors)} exposants** ({start}–{end}) récupérés depuis {url} :\n"
+    lines = [
+        header,
+        "| Nom | Stand | URL |",
+        "|-----|-------|-----|",
+    ]
+    for e in exhibitors:
+        name = (e.name or "—").replace("|", "\\|")
+        booth = (e.booth or "—").replace("|", "\\|")
+        url_cell = f"[Profil]({e.profile_url})" if e.profile_url else "—"
+        lines.append(f"| {name} | {booth} | {url_cell} |")
+    return "\n".join(lines)
 
 
 def _exhibitors_to_context(exhibitors: List[Exhibitor], *, limit: int = 80) -> str:
@@ -221,28 +244,43 @@ async def _maybe_scrape(
     scrape_spec_path: Optional[str],
     headless: bool,
     timeout_ms: int,
+    limit: int = 50,
+    offset: int = 0,
     env: Optional[Dict[str, str]] = None,
+    on_status: StatusCallback = None,
 ) -> Optional[List[Exhibitor]]:
     if not scrape_url:
         return None
 
     if scrape_spec_path:
+        _status_cb(on_status, f"Spec trouvé : {scrape_spec_path}")
         spec: ScrapeSpec = load_spec(scrape_spec_path)
     elif env:
         # No spec found — analyze the page and let the LLM generate one
-        html = await analyze_page(scrape_url, headless=headless, timeout_ms=timeout_ms)
+        _status_cb(on_status, "Aucun spec connu — analyse automatique de la page...")
+        html = await analyze_page(scrape_url, headless=headless, timeout_ms=timeout_ms, on_status=on_status)
+        _status_cb(on_status, "Génération du spec de scraping par le LLM...")
         spec = _generate_spec(html, scrape_url, env)
         _save_spec(spec, scrape_url)
+        _status_cb(on_status, "Spec généré et sauvegardé.")
     else:
         return None
 
-    exhibitors = await scrape_exhibitors(
+    exhibitors = await scrape_hybrid(
         scrape_url,
         spec,
         headless=headless,
         timeout_ms=timeout_ms,
+        on_status=on_status,
+        limit=limit,
+        offset=offset,
     )
     return exhibitors
+
+
+def _status_cb(on_status: StatusCallback, msg: str) -> None:
+    if on_status:
+        on_status(msg)
 
 
 def build_messages(
@@ -273,20 +311,20 @@ def build_messages(
 
 
 _AGENT_SYSTEM_PROMPT = (
-    "Tu es un assistant spécialisé dans l'analyse de salons professionnels et d'exposants.\n"
-    "Tu disposes d'un outil de scraping automatique qui tourne AVANT que tu reçoives ce message.\n"
-    "Le scraping est déjà terminé quand tu réponds — tu ne peux pas en lancer un toi-même.\n\n"
+    "Tu es un assistant conversationnel spécialisé dans les salons professionnels et les exposants.\n"
+    "Tu peux répondre à n'importe quelle question, discuter, analyser des données, et aider l'utilisateur.\n"
+    "Tu disposes aussi d'un outil de scraping automatique qui se déclenche quand l'utilisateur fournit une URL.\n\n"
     "RÈGLES :\n"
-    "1. Si le contexte contient des données d'exposants (liste après 'Exposants trouvés') :\n"
-    "   → Affiche-les IMMÉDIATEMENT sous forme de tableau Markdown (colonnes : Nom, Stand, URL).\n"
-    "   → Ne pose aucune question, ne demande pas de validation, réponds directement.\n"
-    "2. Si le contexte indique 'Aucune donnée' ou est vide :\n"
-    "   → Dis que le scraping n'a pas pu récupérer les données (protection du site, sélecteurs incorrects).\n"
-    "   → Suggère à l'utilisateur de vérifier l'URL ou de réessayer.\n"
-    "   → Ne dis PAS 'je vais récupérer' ou 'veuillez patienter' — le scraping est déjà terminé.\n"
-    "3. Si l'utilisateur demande des exposants sans URL :\n"
-    "   → Demande uniquement l'URL complète (ex: https://www.vivatechnology.com/exhibitors).\n"
-    "4. Ne dis JAMAIS que tu ne peux pas accéder à internet."
+    "1. Si le contexte contient 'SCRAPING TERMINÉ AVEC SUCCÈS' :\n"
+    "   → Affiche les exposants IMMÉDIATEMENT sous forme de tableau Markdown (colonnes : Nom, Stand, URL).\n"
+    "   → Ne pose aucune question avant d'afficher le tableau.\n"
+    "2. Si le contexte contient 'SCRAPING TERMINÉ MAIS AUCUN EXPOSANT' :\n"
+    "   → Explique que le scraping a échoué et suggère de vérifier l'URL.\n"
+    "3. Sans contexte de scraping (cas le plus courant) :\n"
+    "   → Réponds normalement à la question ou au message de l'utilisateur.\n"
+    "   → Si l'utilisateur demande une liste d'exposants d'un salon, demande-lui l'URL de la page des exposants.\n"
+    "   → NE dis PAS que le scraping a échoué — aucun scraping n'a été tenté.\n"
+    "4. Ne dis jamais que tu ne peux pas accéder à internet."
 )
 
 
@@ -332,29 +370,32 @@ def handle_chat_request(payload: Dict[str, Any]) -> Dict[str, Any]:
                         scrape_spec_path=str(spec_path) if spec_path else None,
                         headless=bool(scrape_cfg.get("headless", True)),
                         timeout_ms=int(scrape_cfg.get("timeout_ms", 30_000)),
+                        limit=int(scrape_cfg.get("limit", 50)),
+                        offset=int(scrape_cfg.get("offset", 0)),
                         env=env,
+                        on_status=_emit_status,
                     )
                 )
             except Exception as exc:
-                print(f"[scraper] error: {exc}", file=sys.stderr)
+                print(json.dumps({"type": "status", "msg": f"Erreur scraping : {exc}"}), file=sys.stderr, flush=True)
                 exhibitors = []
 
             ex_list = exhibitors or []
             scrape_result = {"exhibitors": [asdict(e) for e in ex_list]}
 
-            # Prepend as system context — always explicit about success or failure
             if ex_list:
-                context_txt = (
-                    f"SCRAPING TERMINÉ AVEC SUCCÈS — {len(ex_list)} exposants récupérés depuis {url}.\n\n"
-                    + _exhibitors_to_context(ex_list)
-                )
+                # ── Fast path: build the markdown table directly, skip LLM ──
+                offset_used = int(scrape_cfg.get("offset", 0))
+                assistant = _format_exhibitors_markdown(ex_list, str(url), offset=offset_used)
+                return {"assistant": assistant, "scrape": scrape_result}
             else:
+                # Scraping failed — ask the LLM to explain
                 context_txt = (
                     f"SCRAPING TERMINÉ MAIS AUCUN EXPOSANT RÉCUPÉRÉ depuis {url}.\n"
                     "Causes possibles : protection anti-bot, sélecteurs CSS incorrects, page nécessitant une authentification.\n"
                     "Informe l'utilisateur de l'échec et suggère-lui de vérifier l'URL ou de réessayer."
                 )
-            messages = [{"role": "system", "content": context_txt}] + messages
+                messages = [{"role": "system", "content": context_txt}] + messages
 
     raw = chat_completions(
         messages=messages,

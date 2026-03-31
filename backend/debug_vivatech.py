@@ -1,10 +1,7 @@
 """Debug script for VivaTechnology exhibitors page.
 
 Runs headful so you can see the browser and dismiss any cookie banner.
-Captures:
-  - Network requests (XHR/fetch) that look like exhibitor data
-  - Repeated visible elements (candidate CSS selectors)
-  - An HTML dump of the page after full load
+Captures ALL JSON responses and prints candidate CSS selectors.
 
 Usage:
     python debug_vivatech.py
@@ -12,55 +9,66 @@ Usage:
 
 import asyncio
 import json
-import re
+import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 from playwright.async_api import async_playwright
 
 URL = "https://www.vivatechnology.com/exhibitors"
-OUTPUT_HTML = "vivatech_dump.html"
 
 
 async def main() -> None:
-    api_responses: list[dict] = []
+    all_json: list[dict] = []
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=False)
         context = await browser.new_context()
         page = await context.new_page()
 
-        # Intercept responses that look like JSON exhibitor lists
+        # Capture ALL JSON responses — no URL filtering
         async def handle_response(response):
-            url = response.url
             ct = response.headers.get("content-type", "")
-            if "json" in ct and any(k in url for k in ["exhibitor", "company", "vendor", "participant", "expose"]):
-                try:
-                    body = await response.json()
-                    api_responses.append({"url": url, "data": body})
-                    print(f"  [API] {url}")
-                except Exception:
-                    pass
+            if "json" not in ct:
+                return
+            if response.status < 200 or response.status >= 300:
+                return
+            try:
+                text = await response.text()
+                if len(text) < 100:
+                    return
+                all_json.append({"url": response.url, "size": len(text), "text": text})
+                print(f"  [JSON] {len(text):>8} chars  {response.url}")
+            except Exception:
+                pass
 
         page.on("response", handle_response)
 
         print(f"Opening {URL} ...")
         await page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
-        print("Page loaded. Waiting 8 seconds — dismiss cookie banner if needed...")
-        await page.wait_for_timeout(8_000)
+        print("Page loaded. Waiting 6s — dismiss cookie banner if needed...")
+        await page.wait_for_timeout(6_000)
 
-        # Scroll to trigger lazy loading
-        print("Scrolling to load exhibitors...")
-        for _ in range(5):
+        # Scroll to trigger lazy loading + API calls
+        print("Scrolling to trigger exhibitor loading...")
+        for i in range(6):
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(1_500)
+            count = await page.evaluate("document.querySelectorAll('*').length")
+            print(f"  scroll {i+1}/6 — {count} DOM elements")
 
-        # Candidate selectors (visible elements repeated 5+ times)
-        print("\n--- Candidate selectors (visible, repeated) ---")
+        await page.wait_for_timeout(2_000)
+
+        # ── Candidate CSS selectors ──────────────────────────────────────────
+        print("\n--- Candidate selectors (visible, repeated ≥5x) ---")
         candidates = await page.evaluate("""() => {
             const hidden = new Set([
                 'opacity-0','invisible','hidden','sr-only',
-                'translate-y-full','-translate-y-full','scale-0'
+                'translate-y-full','-translate-y-full','scale-0','pointer-events-none'
             ]);
             const counts = {};
+            const samples = {};
             document.querySelectorAll('*').forEach(el => {
                 const cls = [...el.classList].filter(Boolean);
                 if (!cls.length) return;
@@ -69,36 +77,63 @@ async def main() -> None:
                 if (rect.width === 0 || rect.height === 0) return;
                 const key = el.tagName.toLowerCase() + '.' + cls.join('.');
                 counts[key] = (counts[key] || 0) + 1;
+                if (!samples[key]) samples[key] = el;
             });
             return Object.entries(counts)
                 .filter(([, n]) => n >= 5)
                 .sort((a, b) => b[1] - a[1])
                 .slice(0, 40)
-                .map(([sel, n]) => sel + ' (x' + n + ')');
+                .map(([sel, n]) => {
+                    const el = samples[sel];
+                    const link = el ? el.querySelector('a[href]') : null;
+                    const h = el ? (el.querySelector('h1,h2,h3,h4') || {}).textContent : null;
+                    return {
+                        sel: sel,
+                        count: n,
+                        hasLink: !!link,
+                        linkHref: link ? link.getAttribute('href') : null,
+                        heading: h ? h.trim().slice(0, 60) : null
+                    };
+                });
         }""")
 
         for c in candidates:
-            print(" ", c)
+            link_info = f"  → {c['linkHref']}" if c['hasLink'] else ""
+            head_info = f"  h={c['heading']}" if c['heading'] else ""
+            print(f"  {c['sel']} (x{c['count']}){link_info}{head_info}")
 
-        # Save HTML
-        html = await page.content()
-        with open(OUTPUT_HTML, "w", encoding="utf-8") as f:
-            f.write(html)
-        print(f"\nHTML saved to {OUTPUT_HTML} ({len(html)} chars)")
+        # ── Analyse JSON responses ───────────────────────────────────────────
+        print(f"\n--- JSON responses captured: {len(all_json)} total ---")
 
-        # API responses summary
-        if api_responses:
-            print(f"\n--- API responses captured ({len(api_responses)}) ---")
-            for r in api_responses:
-                print(f"  {r['url']}")
-                print(f"    → {str(r['data'])[:200]}")
-        else:
-            print("\n--- No JSON API responses captured for exhibitors ---")
-            print("  Try opening Network tab in DevTools and filter by Fetch/XHR while scrolling.")
+        # Sort by size descending — large responses are more likely to be data
+        all_json.sort(key=lambda x: x["size"], reverse=True)
 
+        for r in all_json[:20]:
+            print(f"\n{'='*70}")
+            print(f"URL: {r['url']}")
+            print(f"Size: {r['size']} chars")
+            try:
+                data = json.loads(r["text"])
+                # Try to find lists of objects
+                def find_lists(obj, depth=0, path="root"):
+                    if depth > 4:
+                        return
+                    if isinstance(obj, list) and len(obj) >= 3:
+                        if isinstance(obj[0], dict):
+                            keys = list(obj[0].keys())[:8]
+                            print(f"  LIST[{len(obj)}] at {path} → keys: {keys}")
+                            if len(obj) > 0:
+                                print(f"    first item: {json.dumps(obj[0], ensure_ascii=False)[:300]}")
+                    elif isinstance(obj, dict):
+                        for k, v in list(obj.items())[:10]:
+                            find_lists(v, depth+1, f"{path}.{k}")
+                find_lists(data)
+            except Exception as e:
+                print(f"  (parse error: {e}) raw: {r['text'][:200]}")
+
+        print("\n--- Done ---")
+        print("Tip: look for LIST entries above with exhibitor-like keys (name, company, title, etc.)")
         await browser.close()
-
-    print("\nDone.")
 
 
 if __name__ == "__main__":

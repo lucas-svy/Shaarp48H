@@ -1,0 +1,18 @@
+{
+  "base_url": "https://www.mwcbarcelona.com/exhibitors",
+  "cards_selector": "div.self-start",
+  "wait_for_selector": "div.self-start",
+  "fields": {
+    "name": "h3.wrap-anywhere",
+    "booth": "span.whitespace-nowrap",
+    "profile_url": "a[href]"
+  },
+  "pagination": {
+    "mode": "infinite_scroll",
+    "next_selector": null,
+    "max_pages": 10,
+    "scroll_pause_ms": 800,
+    "max_scroll_rounds": 30
+  },
+  "dedupe_by": "profile_url"
+}
