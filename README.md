@@ -1,5 +1,7 @@
 # Shaarp48H
 
+Afin d'en savoir plus sur les différentes parties, merci de vous référer aux readme présents dans les dossiers backend et frontend
+
 ## RGPD ##
 
 1. Nature des données collectés 
